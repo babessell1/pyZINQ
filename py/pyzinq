@@ -1,0 +1,298 @@
+import numpy as np
+import pandas as pd
+from scipy.stats import ttest_ind, pearsonr
+
+class ZINQ:
+    """
+    Zero-inflated quantile test with ensembling for generic data.
+
+    Parameters:
+    -----------
+    data_matrix : tuple[pd.DataFrame]
+        tuple of n x 2 dataframes (n samples x sample name + feature name)
+        corresponding to different algorithms or methods producing similar 
+        for the same samples. Missing values for features are allowed. (np.nan)
+    
+    metadata : pd.DataFrame
+        n x c dataframe (n samples x sample name + covariate name)
+        with covariates and the variable to test. Missing data 
+        here is NOT allowed.
+
+    data_names : list[str]
+        names of the data sources for key-access to results.
+
+    test_variable : str
+        variable to test in the metadata dataframe.
+
+    covariates2include : list[str]
+        list of covariates to correct for. Default is ["all"].
+        Can also include "libsize" to use library size as a covariate
+
+    quantile_levels : list[float]
+        quantile levels to regress on. Default is [0.1, 0.25, 0.5, 0.75, 0.9]
+    
+    method : str
+        method to combine p-values. Default is "MinP".
+        Options are "MinP" and "Cauchy".
+
+    seed : int
+        seed for random number generation. Default is 37.
+
+        
+    Properties:
+    -----------
+    dnames : list[str]
+        names of the data sources for key-access to results.
+
+    data : dict[str, pd.DataFrame]
+        dictionary of dataframes corresponding to different algorithms
+    
+    meta : dict[str, pd.DataFrame]
+        dictionary of metadata dataframes corresponding to different algorithms
+
+    test_var : str
+        variable to test in the metadata dataframe.
+
+    quantiles : list[float]
+        quantile levels to regress on.
+
+    method : str
+        method to combine p-values.
+
+    seed : int
+
+    binary : bool
+        True if the test variable is binary, False otherwise.
+    
+    warning_codes : dict[str, list[int]]
+        warning codes for each feature.
+        1: When library size is a confounder.
+        2: When all read counts are zero.
+        3: When there are limited non-zero read counts (<30 or <15).
+        4: When there is a perfect separation w.r.t. the variable(s) of interest.
+    
+    z_pvalues : dict[str, dict[str, float]]
+        p-values for firth logistic regression.
+
+    q_pvalues : dict[str, dict[str, float]]
+        p-values from quantile regression.
+    
+    combined_pvalues : dict[str, dict[str, float]]
+        combined p-values.
+
+    Public Methods:
+    ---------------
+    run_zinq()
+        Run Entire ZINQ pipeline and return dataframes with p-values
+        ...
+        returns: resulting p values for each data source in the same
+                 it was provided in the constructor
+        -> tuple(pd.DataFrame(columns=[
+            "Firth_Logistic", "Quantile", "Combined"], index=data_names))
+
+    run_sanity_check()
+        Run sanity check before applying ZINQ.
+        ...
+        returns: warning_codes 
+        -> dict[str, list[int]]
+
+    run_marginal_tests()
+        Run marginal tests for the Firth logistic and quantile regression
+        components for each data source.
+        ...
+        returns: z_pvalues, q_pvalues
+        -> tuple(dict[dict[str, float]], dict[dict[str, float]])
+    
+    run_test_combination()
+        Combine the marginal p-values for each data source.
+        ...
+        returns: combined_pvalues
+        -> dict[dict[str, float]]
+    
+    Private Methods:
+    ---------------
+    _check(dname: str) -> list[int]
+        Sanity check a single data source.
+
+    ZINQ
+    """
+    def __init__(self, 
+                 data_matrix : tuple[pd.DataFrame], # list of dataframes correpsonding to different algorithms prodcucing similar data [n x 2, n x 2, ...]
+                 metadata : pd.DataFrame, # list of dataframes correpsonding to different algorithms prodcucing similar data [n x p, n x p, ...]
+                 data_names : list[str], # names of the data sources
+                 test_variable : str, # variable to test
+                 covariates2include : list = ["all"], # list of covariates to correct for
+                 quantile_levels : list = [0.1, 0.25, 0.5, 0.75, 0.9], # quantile levels to regress on
+                 method : str = "MinP", # method to combine p-values
+                 seed : int = 2020): # seed for random number generation
+        
+        if covariates2include == ["all"]: self.covars = metadata.columns
+        self.dnames = data_names
+        self.data = {data_names[i]: data_matrix[i] for i in range(len(data_matrix))}
+        self.meta = {data_names[i]: metadata[i] for i in range(len(metadata))}
+        self.test_var = test_variable
+        self.quantiles = quantile_levels
+        self.method = method
+        self.seed = seed
+        self.binary = True if len(np.unique(self.meta[self.test_var])) == 2 else False
+       
+        # add ensemble key for ensembled data sources
+        # in combination test
+        data_names.append("ensemble" if len(data_names) > 1 else None)
+
+        # calculable properties
+        self.warning_codes = {{dname: [] for dname in self.dnames}}
+        self.z_pvalue = {{dname: -1 for dname in self.dnames}}
+        self.q_pvalues = {{dname: -1 for dname in self.dnames}}
+        self.ensemble_pvalue = -1
+
+
+    def run_zinq(self) -> tuple[pd.DataFrame]:
+        """
+        Run Entire ZINQ pipeline and return dataframes with p-values
+        """
+        self.run_sanity_check()
+        self.run_marginal_tests()
+        return self.run_test_combination()
+
+
+    def _check_all(self) -> dict[int: list[int]]:
+        """
+        Sanity check a single data source
+        """
+        return {dname: self._check(dname) for dname in self.dnames}
+    
+
+    def _check(self, dname) -> list[int]:
+        """
+        Sanity check a single data source
+        """
+        return [
+            i for i,chk in enumerate([
+                self._check_lib_confound(dname),
+                self._check_all_zero(dname),
+                self._check_limited_non_zero(dname)
+                self._check_perfect_separation(dname)
+            ]) if chk]
+
+
+    def _check_lib_confound(self, dname) -> list[list[int]]:
+        """
+        Check if library size is a confounder.
+        """
+        lib_size = self.data[dname].sum(axis=1)
+        test_vars = self.meta[self.test_var]
+        if self.binary:
+            responses = test_vars.unique()
+            _, pval = ttest_ind(
+                lib_size[test_vars.eq(responses[0])],
+                lib_size[test_vars.eq(responses[1])]
+            )
+        else: # quantitative
+            _, pval = pearsonr(lib_size, self.meta[self.test_var])
+        
+        return True if pval < 0.05 else False
+    
+
+    def _check_all_zero(self, dname) -> list[int]:
+        """
+        Check if all read counts are zero.
+        """
+        return True if self.data[dname].sum(axis=1).eq(0).all() else False
+    
+
+    def _check_limited_non_zero(self, dname, thresh=30) -> list[int]:
+        """
+        Check if there are limited non-zero read counts.
+        """
+        return True if self.data[dname].sum(axis=1).lt(thresh).all() else False
+    
+
+    def _check_perfect_separation(self, dname) -> list[int]:
+        """
+        Check if there is perfect separation w.r.t. the variable(s) of interest.
+        """
+        test_var = self.meta[self.test_var]
+        uniq = test_var.unique() # unique values of the test variable
+        t1idx = np.which(test_var.eq(uniq[0])) # index of the first unique value
+        t2idx = np.which(test_var.eq(uniq[1])) # index of the second unique value
+        z_idx = np.which(self.data[dname].eq(0)) # index of zero values
+        zeros_in_t1 = np.intersect1d(t1idx, z_idx) # zero values in the first unique value
+        zeros_in_t2 = np.intersect1d(t2idx, z_idx)
+        len_1, len_2 = len(zeros_in_t1), len(zeros_in_t2)
+
+        return True if (len_1 == 0 or len_2 == 0) and (len_1 + len_2) > 0 else False
+
+
+    def run_sanity_check(self): 
+        """
+        Run sanity check before applying ZINQ.
+        """
+        codes = self._check_all()
+        code_map = {
+            1: "Library size is a confounder.",
+            2: "All read counts are zero.",
+            3: "Limited non-zero read counts (<30 or <15).",
+            4: "Perfect separation w.r.t. the variable(s) of interest."
+        }
+        for dname in self.dnames: codes[dname] = self._check(dname)
+        print(f"""{'\n\n'.join([f'''                  
+        Source {dname}, has the following warnings: \n
+        {'\n\t'.join([f"{codes[dname].count(cnt)} samples where {code_map[cnt]}" 
+        for cnt in codes.keys()])}''' for dname in self.dnames])}""")
+
+        self.warning_codes = codes
+        return codes
+
+
+    @staticmethod
+    def firth_logistic_regression(X, y):
+        """
+        Perform Firth logistic regression.
+
+        beta_hat = argmin | sum(y_i  - pi_i + h_i(1/2 - pi_i))x_{ir} |
+            i -> N, r -> p = len(beta)
+
+        Where: 
+            h_i = ith diagonal element of:
+                W^(1/2)X(X'WX)^(-1)X'W^(1/2)
+
+            |I(beta)|^(1/2) = (X'WX)^(1/2) = Fisher information matrix
+
+            pi_i = 1 / (1 + exp(-x_i*beta)) = probability of success
+            W = diag(pi_i(1-pi_i)) = weight matrix
+            X = design matrix (n x p) 
+        """
+        # Determine First-type estimates beta_hat
+        calc_pi = lambda X, beta: 1 / (1 + np.exp(-X @ beta))
+        calc_W = lambda pi: np.diag(pi * (1 - pi))
+        H = lambda X, W: np.linalg.inv(X.T @ W @ X)
+        beta_hat = np.zeros(X.shape[1])
+
+        # optimize beta_hat
+        for _ in range(1000):
+            pi = calc_pi(X, beta_hat)
+            W = calc_W(pi)
+            Hessian = H(X, W)
+            gradient = X.T @ (y - pi) - 0.5 * np.diag(Hessian)
+            beta_hat += np.linalg.inv(Hessian) @ gradient
+
+        # or use a norm 
+        beta_hat = np.linalg.norm(beta_hat, ord=2)
+        return beta_hat
+
+
+    def quantile_regression(self, formula, data, taus):
+        pass
+
+    def rank_score_test(self, predicted_quantiles, observed_data, taus):
+        pass
+
+    def marginal_tests(self, formula_logistic, formula_quantile, C, y_CorD, data, taus, seed):
+        pass
+
+    def test_combination(self, input, method, taus, M):
+        pass
+
+    def run_zinq(self):
+        pass
