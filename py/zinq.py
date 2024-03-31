@@ -1,6 +1,10 @@
+import sys
 import numpy as np
 import pandas as pd
-from scipy.stats import ttest_ind, pearsonr
+from scipy.stats import ttest_ind, pearsonr, sf
+from scipy import optimize
+from numba import jit, njit
+from firth import firth_logistic_regression
 
 class ZINQ:
     """
@@ -125,8 +129,8 @@ class ZINQ:
                  quantile_levels : list = [0.1, 0.25, 0.5, 0.75, 0.9], # quantile levels to regress on
                  method : str = "MinP", # method to combine p-values
                  seed : int = 2020): # seed for random number generation
-        
-        if covariates2include == ["all"]: self.covars = metadata.columns
+    
+        self.covars = metadata.columns.pop(test_variable) if covariates2include == ["all"] else []
         self.dnames = data_names
         self.data = {data_names[i]: data_matrix[i] for i in range(len(data_matrix))}
         self.meta = {data_names[i]: metadata[i] for i in range(len(metadata))}
@@ -135,12 +139,19 @@ class ZINQ:
         self.method = method
         self.seed = seed
         self.binary = True if len(np.unique(self.meta[self.test_var])) == 2 else False
-       
+
+        self.C = metadata[test_variable].to_numpy() # outcome variable
+        self.Z = metadata[self.covars].to_numpy() # covariates
+        _ZC = np.hstack((self.Z, self.C)) # covariates and outcome variable
+
         # add ensemble key for ensembled data sources
         # in combination test
         data_names.append("ensemble" if len(data_names) > 1 else None)
 
-        # calculable properties
+        # design matrix (n x p) p = covs + data + outcome
+        self.X = {dname: np.hstack((self.data[dname], _ZC)) for dname in self.dnames}
+
+        # init properties
         self.warning_codes = {{dname: [] for dname in self.dnames}}
         self.z_pvalue = {{dname: -1 for dname in self.dnames}}
         self.q_pvalues = {{dname: -1 for dname in self.dnames}}
@@ -161,7 +172,6 @@ class ZINQ:
         Sanity check a single data source
         """
         return {dname: self._check(dname) for dname in self.dnames}
-    
 
     def _check(self, dname) -> list[int]:
         """
@@ -171,7 +181,7 @@ class ZINQ:
             i for i,chk in enumerate([
                 self._check_lib_confound(dname),
                 self._check_all_zero(dname),
-                self._check_limited_non_zero(dname)
+                self._check_limited_non_zero(dname),
                 self._check_perfect_separation(dname)
             ]) if chk]
 
@@ -224,7 +234,7 @@ class ZINQ:
         return True if (len_1 == 0 or len_2 == 0) and (len_1 + len_2) > 0 else False
 
 
-    def run_sanity_check(self): 
+    def run_sanity_check(self) -> dict[str, list[int]]:
         """
         Run sanity check before applying ZINQ.
         """
@@ -243,45 +253,22 @@ class ZINQ:
 
         self.warning_codes = codes
         return codes
-
-
+    
     @staticmethod
-    def firth_logistic_regression(X, y):
+    def _firth_regress(C : np.array, x : np.ndarray) -> tuple[np.array[float]]: # x 5 
+        # betas, bse, fitll, stats, pvals 
+        return firth_logistic_regression(C, x)
+
+    
+    def run_firth_regression(self, dname):
         """
-        Perform Firth logistic regression.
-
-        beta_hat = argmin | sum(y_i  - pi_i + h_i(1/2 - pi_i))x_{ir} |
-            i -> N, r -> p = len(beta)
-
-        Where: 
-            h_i = ith diagonal element of:
-                W^(1/2)X(X'WX)^(-1)X'W^(1/2)
-
-            |I(beta)|^(1/2) = (X'WX)^(1/2) = Fisher information matrix
-
-            pi_i = 1 / (1 + exp(-x_i*beta)) = probability of success
-            W = diag(pi_i(1-pi_i)) = weight matrix
-            X = design matrix (n x p) 
+        Perform Firth logistic regression on a single data source.
+        For a single 
         """
-        # Determine First-type estimates beta_hat
-        calc_pi = lambda X, beta: 1 / (1 + np.exp(-X @ beta))
-        calc_W = lambda pi: np.diag(pi * (1 - pi))
-        H = lambda X, W: np.linalg.inv(X.T @ W @ X)
-        beta_hat = np.zeros(X.shape[1])
-
-        # optimize beta_hat
-        for _ in range(1000):
-            pi = calc_pi(X, beta_hat)
-            W = calc_W(pi)
-            Hessian = H(X, W)
-            gradient = X.T @ (y - pi) - 0.5 * np.diag(Hessian)
-            beta_hat += np.linalg.inv(Hessian) @ gradient
-
-        # or use a norm 
-        beta_hat = np.linalg.norm(beta_hat, ord=2)
-        return beta_hat
-
-
+        # betas, bse, fitll, stats, pvals 
+        return [self._firth_regress(self.C, self.X[i,:]) for i in range(self.X.shape[0])]
+    
+    
     def quantile_regression(self, formula, data, taus):
         pass
 
