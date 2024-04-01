@@ -1,10 +1,14 @@
 import sys
 import numpy as np
 import pandas as pd
-from scipy.stats import ttest_ind, pearsonr, sf
+from scipy.stats import ttest_ind, pearsonr, sf, norm
 from scipy import optimize
 from numba import jit, njit
+# quantile regression
+import statsmodels.api as sm
+from statsmodels.formula.api import smf
 from firth import firth_logistic_regression
+from helpers import *
 
 class ZINQ:
     """
@@ -121,41 +125,37 @@ class ZINQ:
     ZINQ
     """
     def __init__(self, 
-                 data_matrix : tuple[pd.DataFrame], # list of dataframes correpsonding to different algorithms prodcucing similar data [n x 2, n x 2, ...]
+                 data_matrix : tuple[pd.DataFrame], # list of dataframes correpsonding to different algorithms prodcucing similar data [n x 2, n x 2, ...] 1 is response, 2 is variable of interest
                  metadata : pd.DataFrame, # list of dataframes correpsonding to different algorithms prodcucing similar data [n x p, n x p, ...]
                  data_names : list[str], # names of the data sources
-                 test_variable : str, # variable to test
+                 response : str, # response variable
                  covariates2include : list = ["all"], # list of covariates to correct for
                  quantile_levels : list = [0.1, 0.25, 0.5, 0.75, 0.9], # quantile levels to regress on
                  method : str = "MinP", # method to combine p-values
-                 seed : int = 2020): # seed for random number generation
+                 count_data : bool = False, # count data need to perform dithering
+                 seed : int = 2020): # seed for ditheirng
     
-        self.covars = metadata.columns.pop(test_variable) if covariates2include == ["all"] else []
+        self.covars = metadata.columns if covariates2include == ["all"] else covariates2include
         self.dnames = data_names
-        self.data = {data_names[i]: data_matrix[i] for i in range(len(data_matrix))}
-        self.meta = {data_names[i]: metadata[i] for i in range(len(metadata))}
-        self.test_var = test_variable
         self.quantiles = quantile_levels
         self.method = method
         self.seed = seed
         self.binary = True if len(np.unique(self.meta[self.test_var])) == 2 else False
 
-        self.C = metadata[test_variable].to_numpy() # outcome variable
         self.Z = metadata[self.covars].to_numpy() # covariates
-        _ZC = np.hstack((self.Z, self.C)) # covariates and outcome variable
-
+        self.C = metadata[response].to_numpy() # response variable
+        
         # add ensemble key for ensembled data sources
         # in combination test
         data_names.append("ensemble" if len(data_names) > 1 else None)
 
-        # design matrix (n x p) p = covs + data + outcome
-        self.X = {dname: np.hstack((self.data[dname], _ZC)) for dname in self.dnames}
-
-        # init properties
-        self.warning_codes = {{dname: [] for dname in self.dnames}}
-        self.z_pvalue = {{dname: -1 for dname in self.dnames}}
-        self.q_pvalues = {{dname: -1 for dname in self.dnames}}
-        self.ensemble_pvalue = -1
+        self.warning_codes = self.z_pvalues = self.q_pvalues = self.quant = self.Y = {}
+        for dname in self.dnames:
+            #self.X[dname] = np.hstack((self.data[dname], _ZC)) # design matrix
+            self.warning_codes[dname] = [] 
+            self.z_pvalues[dname] = -1 # firth logistic regression p-values
+            self.q_pvalues[dname] = -1 # quantile regression p-values
+            self.Y[dname] = data_matrix[0].iloc[:, 1].to_numpy() # count data
 
 
     def run_zinq(self) -> tuple[pd.DataFrame]:
@@ -254,6 +254,7 @@ class ZINQ:
         self.warning_codes = codes
         return codes
     
+    
     @staticmethod
     def _firth_regress(C : np.array, x : np.ndarray) -> tuple[np.array[float]]: # x 5 
         # betas, bse, fitll, stats, pvals 
@@ -266,20 +267,132 @@ class ZINQ:
         For a single 
         """
         # betas, bse, fitll, stats, pvals 
-        return [self._firth_regress(self.C, self.X[i,:]) for i in range(self.X.shape[0])]
+        return self._firth_regress(self.C, self.Z[dname])
+
     
+    def _get_quantile(self, dname) -> np.ndarray:
+        """
+        Build quantile matrix for quantile regression.
+        """
+        # get non-zero indices
+        idx_nonzero = np.where(self.Y[dname].ne(0))
+        zero_rate = len(idx_nonzero) / len(self.Y[dname])
+        yq = dither(self.Y[dname][idx_nonzero], type="right", value=1)
+
+        return yq, zero_rate
+        
+       
+    @staticmethod
+    def _rank_score_test(c_star, betas, quantiles, m, width):
+        """
+        Rank score test for quantile regression.
+        """
+        # this is ripped straight from the R code
+        rs = [np.sum((tau - betas[k]) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
+        if width == 1:
+            cov_rs = quantiles * (1 - quantiles)
+        else:
+            cov_rs = np.zeros((width, width))
+            for k in range(width - 1):
+                for l in range(k + 1, width):
+                    cov_rs[k, l] = min(quantiles[k], quantiles[l]) - quantiles[k] * quantiles[l]
+            cov_rs = cov_rs + cov_rs.T + np.diag(quantiles * (1 - quantiles))
+        sigma_hat = cov_rs * np.sum(c_star ** 2) / m
+        if width == 1:
+            sigma_hat = np.sqrt(sigma_hat)
+        else:
+            sigma_hat = np.sqrt(np.diag(sigma_hat))
+        
+        # marginal p-value in quantile regression
+        pval_quantile = 2 * (1 - norm.cdf(np.abs(rs / sigma_hat)))
+
+        return pval_quantile
+
+
+    @staticmethod
+    def _fit_quant_model(model, q):
+        """
+        Fit quantile model.
+        """
+        res = model.fit(q=q)
+        qpred0 = res.predict()
+
+        return qpred0
+        
+
+    @staticmethod
+    def _quant_regress(self, C : np.array, y : np.array, yq : np.array, zr : float) -> tuple[np.array[float]]:
+        """
+        Perform quantile regression on a single data source.
+        """
+        z = self.Z
+        C_star = C - z @ np.linalg.solve(z.T @ z) @ z.T @ C
+
+        # rq equivilent for python is smf.quantreg
+        # need as df
+        data = pd.DataFrame(np.hstack((C, y)), columns=["Case"].extend(self.covars))
+        model = smf.quantreg(model, data)
+        qpred0 = [self._fit_quant_model(model, tau) for tau in self.quantiles]
+        m = len(y) 
+        width = len(self.quantiles)
+        pvals = self._rank_score_test(C_star, qpred0, self.quantiles, m, width)
+
+        return pvals
+
+
+    def run_quantile_regression(self, dname):
+        # set X_quant
+        yq, zr = self._get_quantile(dname)
+        pvals = self._quant_regress(self.C, self.Y[dname], yq, zr)
+
+        return pvals
+
+
+    def _marginal_test(self, dname): # ?
+        _, _, _, _, firth_pvals = self.run_firth_regression(dname)
+        quant_pvals = self.run_quantile_regression(dname)
+        return firth_pvals, quant_pvals
     
-    def quantile_regression(self, formula, data, taus):
-        pass
 
-    def rank_score_test(self, predicted_quantiles, observed_data, taus):
-        pass
+    def run_marginal_tests(self) -> tuple[dict[str, dict[str, float]]]:
+        """
+        Run marginal tests for the Firth logistic and quantile regression
+        components for each data source.
+        """
+        for dname in self.dnames:
+            self.z_pvalues[dname], self.q_pvalues[dname] = self._marginal_test(dname)
 
-    def marginal_tests(self, formula_logistic, formula_quantile, C, y_CorD, data, taus, seed):
-        pass
 
-    def test_combination(self, input, method, taus, M):
-        pass
+    @staticmethod
+    def _combine_cauchy(pvalues):
+        """
+        Combine p-values using Cauchy combination
+        """
+        # Convert p-values to Cauchy distributed test statistics
+        cauchy_stats = np.tan(np.pi * (np.array(pvalues) - 0.5))
+
+        # Calculate the sum of Cauchy statistics
+        sum_cauchy = np.sum(cauchy_stats)
+
+        # Convert the sum of the Cauchy statistics back to a p-value
+        combined_p_value = 1 - 0.5 * (1 + np.arctan(sum_cauchy) / np.pi)
+
+        return combined_p_value
+
+
+    def run_test_combination(self):
+        pvals = [pval for pval in self.q_pvalues.values().extend(self.z_pvalues.values())]
+
+        if self.test_combination == "cauchy" or True: #TODO: implement MinP too
+            self.p_combined = self._combine_cauchy(pvals)
+
+        return self.p_combined
+
 
     def run_zinq(self):
-        pass
+        """
+        Run Entire ZINQ pipeline and return dataframes with p-values
+        """
+        self.run_sanity_check()
+        self.run_marginal_tests()
+        return self.run_test_combination()
