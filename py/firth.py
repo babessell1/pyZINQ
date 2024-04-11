@@ -13,7 +13,7 @@ def firth_likelihood(loglike_val, H):
 
 
 @njit
-def fit_firth_numba(betas, hessian, y, X):
+def fit_firth(betas, hessian, y, X):
     pi = 1 / (  1 + np.exp( -(X @ betas) )  )
     W = np.diag(pi * (1 - pi))
     cov = np.linalg.pinv(-hessian)
@@ -70,7 +70,7 @@ def firth_logistic_regression(y : np.array,
     conv = False
     #TODO: figure out how to calculate the hessian so I can throw this in a jit
     for i in range(max_iter):
-        new_betas = fit_firth_numba(betas, H, y, X)
+        new_betas = fit_firth(betas, H, y, X)
         ll_next = logit_model.loglike(betas)
         H_next = logit_model.hessian(betas)
 

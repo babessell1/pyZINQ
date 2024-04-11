@@ -149,13 +149,14 @@ class ZINQ:
         # in combination test
         data_names.append("ensemble" if len(data_names) > 1 else None)
 
-        self.warning_codes = self.z_pvalues = self.q_pvalues = self.quant = self.Y = {}
+        self.warning_codes = self.z_pvalues = self.q_pvalues = self.quant = self.Y = self.weights = {}
         for dname in self.dnames:
             #self.X[dname] = np.hstack((self.data[dname], _ZC)) # design matrix
             self.warning_codes[dname] = [] 
             self.z_pvalues[dname] = -1 # firth logistic regression p-values
             self.q_pvalues[dname] = -1 # quantile regression p-values
             self.Y[dname] = data_matrix[0].iloc[:, 1].to_numpy() # count data
+            self.weights[dname] = 1 # TODO: implement weights
 
 
     def run_zinq(self) -> tuple[pd.DataFrame]:
@@ -326,6 +327,7 @@ class ZINQ:
         Perform quantile regression on a single data source.
         """
         z = self.Z
+        # project out the covariates
         C_star = C - z @ np.linalg.solve(z.T @ z) @ z.T @ C
 
         # rq equivilent for python is smf.quantreg
@@ -364,27 +366,43 @@ class ZINQ:
 
 
     @staticmethod
-    def _combine_cauchy(pvalues):
+    def _combine_cauchy(z_pvals, q_pvals, meta_weights, taus, zero_rate):
         """
         Combine p-values using Cauchy combination
         """
-        # Convert p-values to Cauchy distributed test statistics
-        cauchy_stats = np.tan(np.pi * (np.array(pvalues) - 0.5))
+        # weights based on zero inflation rate
+        weights = taus*(taus <= .5) + (1-taus)*(taus > .5)
+        weights = weights / np.sum(weights) * (1-zero_rate)
 
-        # Calculate the sum of Cauchy statistics
-        sum_cauchy = np.sum(cauchy_stats)
+        # meta weights based on user input for each data source
+        norm_mweights = meta_weights / np.sum(meta_weights)
 
-        # Convert the sum of the Cauchy statistics back to a p-value
-        combined_p_value = 1 - 0.5 * (1 + np.arctan(sum_cauchy) / np.pi)
+        # for each data source, add weighted transformed p-values
+        cauchy_transform = 0
+        for i in range(len(meta_weights)):
+            w = weights[i]
+            z = z_pvals[i]
+            q = q_pvals[i]
+            zr = zero_rate[i]
+            nw = norm_mweights[i]
+            cauchy_transform += nw * (
+                zr * np.tan( (.5-z)*np.pi ) + sum( w*np.tan( (.5-q)*np.pi ) )
+            )
 
-        return combined_p_value
+            pval = 1 - sf(cauchy_transform)
+
+        return pval
 
 
-    def run_test_combination(self):
-        pvals = [pval for pval in self.q_pvalues.values().extend(self.z_pvalues.values())]
+    def run_test_combination(self) -> float:
+        qpvals = [pval for pval in self.q_pvalues.values()]
+        zpvals = [pval for pval in self.z_pvalues.values()]
+        weights = [weight for weight in self.weights.values()]
+        taus = [tau for tau in self.quantiles]
+        zero_rate = [zr for zr in self.zero_rate.values()]
 
         if self.test_combination == "cauchy" or True: #TODO: implement MinP too
-            self.p_combined = self._combine_cauchy(pvals)
+            self.p_combined = self._combine_cauchy(qpvals, zpvals, weights, taus, zero_rate)
 
         return self.p_combined
 
@@ -395,4 +413,5 @@ class ZINQ:
         """
         self.run_sanity_check()
         self.run_marginal_tests()
+
         return self.run_test_combination()
