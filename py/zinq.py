@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 import pandas as pd
-from scipy.stats import ttest_ind, pearsonr, sf, norm
+from scipy.stats import ttest_ind, pearsonr, norm, cauchy
 from scipy import optimize
 from numba import jit, njit
 # quantile regression
@@ -247,10 +247,12 @@ class ZINQ:
             4: "Perfect separation w.r.t. the variable(s) of interest."
         }
         for dname in self.dnames: codes[dname] = self._check(dname)
-        print(f"""{'\n\n'.join([f'''                  
-        Source {dname}, has the following warnings: \n
-        {'\n\t'.join([f"{codes[dname].count(cnt)} samples where {code_map[cnt]}" 
-        for cnt in codes.keys()])}''' for dname in self.dnames])}""")
+        # Print warning messages for each dataset
+         # Print warning messages for each dataset
+        print('\n\n'.join([
+            f'Source {dname}, has the following warnings: \n' + 
+            '\n\t'.join([f"{codes[dname].count(cnt)} samples where {code_map[cnt]}" for cnt in set(codes[dname]) if cnt in code_map])
+            for dname in self.dnames]))
 
         self.warning_codes = codes
         return codes
@@ -389,7 +391,7 @@ class ZINQ:
                 zr * np.tan( (.5-z)*np.pi ) + sum( w*np.tan( (.5-q)*np.pi ) )
             )
 
-            pval = 1 - sf(cauchy_transform)
+            pval = 1 - cauchy.cdf(cauchy_transform)
 
         return pval
 
