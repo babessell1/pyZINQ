@@ -107,7 +107,7 @@ def firth_logistic_regression(y : np.array,
     elif test == 'lrt':
         stats, pvals = [], [] # store chi2 stats and pvals
         # Likelihood ratio test
-        for i, bse in enumerate(bse):
+        for i, _ in enumerate(bse):
             null_X = np.delete(X, i, axis=1)
 
             _, _, null_fitll, _, _ = \
@@ -119,5 +119,5 @@ def firth_logistic_regression(y : np.array,
             lr_pval = 1 if lr < 0 else chi2.sf(lr, 1)
             pvals.append(lr_pval)
 
-
-    return betas, bse, fitll, stats, pvals
+    return betas, bse, fitll, stats, pvals # uncomment for unit test
+    return betas[-1], bse[-1], fitll, stats[-1], pvals[-1]

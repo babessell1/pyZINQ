@@ -5,10 +5,9 @@ from scipy.stats import ttest_ind, pearsonr, norm, cauchy
 from scipy import optimize
 from numba import jit, njit
 # quantile regression
-import statsmodels.api as sm
-from statsmodels.formula.api import smf
-from firth import firth_logistic_regression
-from helpers import *
+import statsmodels.formula.api as smf
+from py.firth import firth_logistic_regression
+from py.helpers import *
 
 class ZINQ:
     """
@@ -125,43 +124,46 @@ class ZINQ:
     ZINQ
     """
     def __init__(self, 
-                 data_matrix : tuple[pd.DataFrame], # list of dataframes correpsonding to different algorithms prodcucing similar data [n x 2, n x 2, ...] 1 is response, 2 is variable of interest
+                 data_matrix : tuple[np.ndarray], # list of dataframes correpsonding to different algorithms prodcucing similar data [n x 2, n x 2, ...] 1 is response, 2 is variable of interest
                  metadata : pd.DataFrame, # list of dataframes correpsonding to different algorithms prodcucing similar data [n x p, n x p, ...]
                  data_names : list[str], # names of the data sources
                  response : str, # response variable
                  covariates2include : list = ["all"], # list of covariates to correct for
                  quantile_levels : list = [0.1, 0.25, 0.5, 0.75, 0.9], # quantile levels to regress on
-                 method : str = "MinP", # method to combine p-values
+                 method : str = "cauchy", # method to combine p-values
                  count_data : bool = False, # count data need to perform dithering
-                 seed : int = 2020): # seed for ditheirng
+                 seed : int = 2024): # seed for ditheirng
     
         self.covars = metadata.columns if covariates2include == ["all"] else covariates2include
+        if response in self.covars: self.covars.remove(response)
+        self.response = response
         self.dnames = data_names
         self.quantiles = quantile_levels
         self.method = method
         self.seed = seed
-        self.binary = True if len(np.unique(self.meta[self.test_var])) == 2 else False
+        self.binary = True if len(np.unique(metadata[response])) == 2 else False
+        self.count_data = count_data
 
         self.Z = metadata[self.covars].to_numpy() # covariates
         self.C = metadata[response].to_numpy() # response variable
         
-        # add ensemble key for ensembled data sources
-        # in combination test
-        data_names.append("ensemble" if len(data_names) > 1 else None)
-
-        self.warning_codes = self.z_pvalues = self.q_pvalues = self.quant = self.Y = self.weights = {}
-        for dname in self.dnames:
+        self.warning_codes = {}
+        self.z_pvalues = {}
+        self.q_pvalues = {}
+        self.quant = {}
+        self.Y = {} 
+        self.weights = {}
+        for i,dname in enumerate(self.dnames):
             #self.X[dname] = np.hstack((self.data[dname], _ZC)) # design matrix
             self.warning_codes[dname] = [] 
             self.z_pvalues[dname] = -1 # firth logistic regression p-values
-            self.q_pvalues[dname] = -1 # quantile regression p-values
-            self.Y[dname] = data_matrix[0].iloc[:, 1].to_numpy() # count data
+            self.Y[dname] = data_matrix[i] if len(self.dnames) > 1 else data_matrix
             self.weights[dname] = 1 # TODO: implement weights
-
+        
 
     def run_zinq(self) -> tuple[pd.DataFrame]:
         """
-        Run Entire ZINQ pipeline and return dataframes with p-values
+        run Entire ZINQ pipeline and return dataframes with p-values
         """
         self.run_sanity_check()
         self.run_marginal_tests()
@@ -170,13 +172,14 @@ class ZINQ:
 
     def _check_all(self) -> dict[int: list[int]]:
         """
-        Sanity check a single data source
+        sanity check a single data source
         """
         return {dname: self._check(dname) for dname in self.dnames}
 
+
     def _check(self, dname) -> list[int]:
         """
-        Sanity check a single data source
+        sanity check a single data source
         """
         return [
             i for i,chk in enumerate([
@@ -187,52 +190,89 @@ class ZINQ:
             ]) if chk]
 
 
-    def _check_lib_confound(self, dname) -> list[list[int]]:
+    def _check_lib_confound(self, dname) -> bool:
         """
-        Check if library size is a confounder.
+        check if library size is a confounder
         """
-        lib_size = self.data[dname].sum(axis=1)
-        test_vars = self.meta[self.test_var]
+        # if only one dimension, return False
+        if len(self.Y[dname].shape) == 1:
+            return False
+
+        # Assumed that self.Y[dname] is an array with library sizes for each sample
+        lib_sizes = self.Y[dname].sum(axis=1)
+        test_vars = self.C
+        pval = None
+
+
         if self.binary:
-            responses = test_vars.unique()
+            # Two unique groups expected
+            responses = np.unique(test_vars)
+            if len(responses) != 2:
+                raise ValueError("Expecting two unique responses for a binary test.")
+
+            # Boolean masks for library sizes in each group
+            mask_0 = test_vars == responses[0]
+            mask_1 = test_vars == responses[1]
+
+            # Sum library sizes within each group
+            lib_size_group_0 = lib_sizes[mask_0].sum()
+            lib_size_group_1 = lib_sizes[mask_1].sum()
+
+            # Perform t-test between summed library sizes of the two groups
             _, pval = ttest_ind(
-                lib_size[test_vars.eq(responses[0])],
-                lib_size[test_vars.eq(responses[1])]
+                [lib_size_group_0],
+                [lib_size_group_1]
             )
-        else: # quantitative
-            _, pval = pearsonr(lib_size, self.meta[self.test_var])
-        
-        return True if pval < 0.05 else False
+
+        else:  # quantitative
+            # Perform correlation between overall summed library size and the test variables
+            pval, _ = pearsonr([lib_sizes.sum()] * len(test_vars), test_vars)
+
+        return pval < 0.05
     
 
     def _check_all_zero(self, dname) -> list[int]:
         """
-        Check if all read counts are zero.
+        check if all read counts are zero
         """
-        return True if self.data[dname].sum(axis=1).eq(0).all() else False
+        return self.Y[dname].sum() == 0
     
 
-    def _check_limited_non_zero(self, dname, thresh=30) -> list[int]:
+    def _check_limited_non_zero(self, dname, thresh=30) -> bool:
         """
-        Check if there are limited non-zero read counts.
+        check if there are limited non-zero read counts
+        
+        Returns True if the total sum of counts is less than `thresh`.
         """
-        return True if self.data[dname].sum(axis=1).lt(thresh).all() else False
+        # Sum the values for the given name and compare with the threshold `thresh`
+        return self.Y[dname].sum() < thresh
     
 
-    def _check_perfect_separation(self, dname) -> list[int]:
+    def _check_perfect_separation(self, dname) -> bool:
         """
-        Check if there is perfect separation w.r.t. the variable(s) of interest.
+        Check if there is perfect separation w.r.t. the binary variable of interest.
+        
+        Perfect separation exists if one unique value in the test variable `self.C`
+        corresponds only to zeros or only to non-zeros in `self.data[dname]`, and the opposite is true
+        for the other unique value in `self.C`.
         """
-        test_var = self.meta[self.test_var]
-        uniq = test_var.unique() # unique values of the test variable
-        t1idx = np.which(test_var.eq(uniq[0])) # index of the first unique value
-        t2idx = np.which(test_var.eq(uniq[1])) # index of the second unique value
-        z_idx = np.which(self.data[dname].eq(0)) # index of zero values
-        zeros_in_t1 = np.intersect1d(t1idx, z_idx) # zero values in the first unique value
-        zeros_in_t2 = np.intersect1d(t2idx, z_idx)
-        len_1, len_2 = len(zeros_in_t1), len(zeros_in_t2)
+        test_var = self.C
+        uniq = np.unique(test_var)  # binary unique values of the test variable
+        
+        if len(uniq) != 2:
+            raise ValueError("The test variable is not binary; there should be exactly two unique values.")
 
-        return True if (len_1 == 0 or len_2 == 0) and (len_1 + len_2) > 0 else False
+        # Indices and values for both groups
+        idx_group_0 = np.where(test_var == uniq[0])[0]
+        idx_group_1 = np.where(test_var == uniq[1])[0]
+        values_group_0 = self.Y[dname][idx_group_0]
+        values_group_1 = self.Y[dname][idx_group_1]
+
+        # Check for perfect separation
+        perfect_separation_group_0 = np.all(values_group_0 == 0) and np.all(values_group_1 != 0)
+        perfect_separation_group_1 = np.all(values_group_1 == 0) and np.all(values_group_0 != 0)
+
+        return perfect_separation_group_0 or perfect_separation_group_1
 
 
     def run_sanity_check(self) -> dict[str, list[int]]:
@@ -250,7 +290,7 @@ class ZINQ:
         # Print warning messages for each dataset
          # Print warning messages for each dataset
         print('\n\n'.join([
-            f'Source {dname}, has the following warnings: \n' + 
+            f'Source `{dname}`, has the following warnings: \n' + 
             '\n\t'.join([f"{codes[dname].count(cnt)} samples where {code_map[cnt]}" for cnt in set(codes[dname]) if cnt in code_map])
             for dname in self.dnames]))
 
@@ -259,29 +299,43 @@ class ZINQ:
     
     
     @staticmethod
-    def _firth_regress(C : np.array, x : np.ndarray) -> tuple[np.array[float]]: # x 5 
+    def _firth_regress(C : np.ndarray, x : np.ndarray) -> tuple[np.ndarray[float]]: # x 5 
         # betas, bse, fitll, stats, pvals 
+        
         return firth_logistic_regression(C, x)
+    
+
+    def _get_XZ(self, dname) -> np.ndarray:
+        """
+        get the design matrix and covariates for a single data source
+        """
+        y_column_vector = self.Y[dname][:, np.newaxis]
+
+        return np.hstack((self.Z, y_column_vector))
 
     
     def run_firth_regression(self, dname):
         """
-        Perform Firth logistic regression on a single data source.
-        For a single 
+        perform firth logistic regression on a single data source
         """
         # betas, bse, fitll, stats, pvals 
-        return self._firth_regress(self.C, self.Z[dname])
+        print(self._get_XZ(dname).shape)
+        return self._firth_regress(self.C, self._get_XZ(dname))
 
     
     def _get_quantile(self, dname) -> np.ndarray:
         """
-        Build quantile matrix for quantile regression.
+        build quantile matrix for quantile regression
         """
-        # get non-zero indices
-        idx_nonzero = np.where(self.Y[dname].ne(0))
-        zero_rate = len(idx_nonzero) / len(self.Y[dname])
-        yq = dither(self.Y[dname][idx_nonzero], type="right", value=1)
-
+        # filter out zeros
+        yq = self.Y[dname][self.Y[dname] != 0]
+        
+        # calculate zero inflation rate
+        zero_rate = np.count_nonzero(self.Y[dname] == 0) / len(self.Y[dname])
+        
+        if self.count_data: # dither discrete data
+            yq = dither(yq, type="right", value=1)
+        
         return yq, zero_rate
         
        
@@ -290,6 +344,7 @@ class ZINQ:
         """
         Rank score test for quantile regression.
         """
+        quantiles = np.array(quantiles)
         # this is ripped straight from the R code
         rs = [np.sum((tau - betas[k]) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
         if width == 1:
@@ -298,7 +353,7 @@ class ZINQ:
             cov_rs = np.zeros((width, width))
             for k in range(width - 1):
                 for l in range(k + 1, width):
-                    cov_rs[k, l] = min(quantiles[k], quantiles[l]) - quantiles[k] * quantiles[l]
+                    cov_rs[k, l] = np.min([quantiles[k], quantiles[l]]) - quantiles[k] * quantiles[l]
             cov_rs = cov_rs + cov_rs.T + np.diag(quantiles * (1 - quantiles))
         sigma_hat = cov_rs * np.sum(c_star ** 2) / m
         if width == 1:
@@ -323,21 +378,24 @@ class ZINQ:
         return qpred0
         
 
-    @staticmethod
-    def _quant_regress(self, C : np.array, y : np.array, yq : np.array, zr : float) -> tuple[np.array[float]]:
+
+    def _quant_regress(self, C : np.ndarray, y : np.ndarray, yq : np.ndarray, zr : float) -> tuple[np.ndarray[float]]:
         """
         Perform quantile regression on a single data source.
-        """
-        z = self.Z
-        # project out the covariates
-        C_star = C - z @ np.linalg.solve(z.T @ z) @ z.T @ C
+        """# Extract the non-zero data from the original data array to match the mask_nonzero size
+        y_not_zero = y != 0
 
-        # rq equivilent for python is smf.quantreg
-        # need as df
-        data = pd.DataFrame(np.hstack((C, y)), columns=["Case"].extend(self.covars))
-        model = smf.quantreg(model, data)
+        Z_nonzero = self.Z[y_not_zero, :]
+        C_nonzero = C[y_not_zero]
+        C_star = C_nonzero - Z_nonzero @ np.linalg.pinv(Z_nonzero.T @ Z_nonzero) @ Z_nonzero.T @ C_nonzero
+
+        # Prepare DataFrame for quantile regression
+        data_nonzero = pd.DataFrame({'C': C_nonzero, 'y': yq})
+
+        # Perform quantile regression for each quantile
+        model = smf.quantreg('y ~ C', data_nonzero)
         qpred0 = [self._fit_quant_model(model, tau) for tau in self.quantiles]
-        m = len(y) 
+        m = len(yq) 
         width = len(self.quantiles)
         pvals = self._rank_score_test(C_star, qpred0, self.quantiles, m, width)
 
@@ -355,13 +413,14 @@ class ZINQ:
     def _marginal_test(self, dname): # ?
         _, _, _, _, firth_pvals = self.run_firth_regression(dname)
         quant_pvals = self.run_quantile_regression(dname)
+        
         return firth_pvals, quant_pvals
     
 
     def run_marginal_tests(self) -> tuple[dict[str, dict[str, float]]]:
         """
-        Run marginal tests for the Firth logistic and quantile regression
-        components for each data source.
+        run marginal tests for firth logistic and quantile regression
+        components for each data source
         """
         for dname in self.dnames:
             self.z_pvalues[dname], self.q_pvalues[dname] = self._marginal_test(dname)
@@ -370,7 +429,7 @@ class ZINQ:
     @staticmethod
     def _combine_cauchy(z_pvals, q_pvals, meta_weights, taus, zero_rate):
         """
-        Combine p-values using Cauchy combination
+        Combine p-values with Cauchy combination test
         """
         # weights based on zero inflation rate
         weights = taus*(taus <= .5) + (1-taus)*(taus > .5)
