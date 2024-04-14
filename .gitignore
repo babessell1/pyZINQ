@@ -1,2 +1,5 @@
-refs
+refs/fit_data.csv
+refs/fit_data.py
+refs/R_ref.R
+refs/zinq_str_analysis.Rmd
 py/__pycache__

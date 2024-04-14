@@ -124,8 +124,8 @@ class ZINQ:
     ZINQ
     """
     def __init__(self, 
-                 data_matrix : tuple[np.ndarray], # list of dataframes correpsonding to different algorithms prodcucing similar data [n x 2, n x 2, ...] 1 is response, 2 is variable of interest
-                 metadata : pd.DataFrame, # list of dataframes correpsonding to different algorithms prodcucing similar data [n x p, n x p, ...]
+                 data_matrix : tuple[np.ndarray], # list of dataframes correpsonding to different algorithms prodcucing similar data (n x 1, n x 1, ...)
+                 metadata : pd.DataFrame, # list of dataframes correpsonding to different algorithms prodcucing similar data (n x p, n x p, ...)
                  data_names : list[str], # names of the data sources
                  response : str, # response variable
                  covariates2include : list = ["all"], # list of covariates to correct for
@@ -377,7 +377,6 @@ class ZINQ:
 
         return qpred0
         
-
 
     def _quant_regress(self, C : np.ndarray, y : np.ndarray, yq : np.ndarray, zr : float) -> tuple[np.ndarray[float]]:
         """
