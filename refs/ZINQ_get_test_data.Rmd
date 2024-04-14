@@ -1,0 +1,54 @@
+---
+title: "Untitled"
+author: "Brandt Bessell"
+date: "2024-03-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(logistf)
+library(microbenchmark)
+library(ZINQ)
+```
+
+```{r}
+data(sex2) 
+fit<-logistf(case~age+oc+vic+vicl+vis+dia, data=sex2, pl=F)
+summary(fit)
+
+#write.csv2(sex2, sep=',', file='C:\\Users\\bbessell\\Projects\\GitHub\\pyZINQ\\refs\\py_ref_firth.csv')
+
+#write.csv2(sum_, sep=',', file='C:\\Users\\bbessell\\Projects\\GitHub\\pyZINQ\\refs\\fit_data.csv')
+
+```
+
+```{r}
+microbenchmark(logistf(case~age+oc+vic+vicl+vis+dia, data=sex2, pl=F), times=100)
+```
+
+```{r}
+data("Sample_Data")
+summary(Sample_Data)
+```
+
+```{r}
+covariates = Sample_Data[, -c(1:2)]
+
+result = vector(mode = "list", length = 2)
+dat = cbind(Y=Sample_Data[, 1], covariates)
+write.csv2(dat, sep=',', file='C:\\Users\\bbessell\\Projects\\GitHub\\pyZINQ\\refs\\taxon_data.csv')
+```
+
+
+```{r}
+result[[1]] = ZINQ_tests(formula.logistic=Y~X+Z1+Z2+Z3, formula.quantile=Y~X+Z1+Z2+Z3, C="X", y_CorD = "D", data=dat)
+print(result[[1]]$pvalue.logistic)
+print(result[[1]]$pvalue.quantile)
+print(result[[1]]$Sigma.hat)
+print(result[[1]]$zerorate)
+
+```
