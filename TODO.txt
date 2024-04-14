@@ -1,0 +1,15 @@
++++++ TOP PRIORITIES +++++
+Fix firth design matrix (_get_XZ) - C and Y are flipped
+Review Quantile regression step (_quant_regress)
+Cross-check rank score test with R and the paper
+
+***** MID PRIORITIES *****
+Optimize the hessian step in firth with njit
+update documentation
+
+----- LOW PRIORITIES -----
+Add missing features
+    weights for different algorithms
+    minP
+
+
