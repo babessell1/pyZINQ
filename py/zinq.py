@@ -148,15 +148,15 @@ class ZINQ:
         self.C = metadata[response].to_numpy() # response variable
         
         self.warning_codes = {}
-        self.z_pvalues = {}
-        self.q_pvalues = {}
-        self.quant = {}
-        self.Y = {} 
-        self.weights = {}
+        self.z_pvalues = {} # zero inflation p value
+        self.q_pvalues = {} # quantile regression p value
+        self.Y = {} # dependent variable
+        self.weights = {} # weights for each data source
         for i,dname in enumerate(self.dnames):
             #self.X[dname] = np.hstack((self.data[dname], _ZC)) # design matrix
             self.warning_codes[dname] = [] 
-            self.z_pvalues[dname] = -1 # firth logistic regression p-values
+            self.z_pvalues[dname] = -1
+            self.q_pvalues[dname] = -1
             self.Y[dname] = data_matrix[i] if len(self.dnames) > 1 else data_matrix
             self.weights[dname] = 1 # TODO: implement weights
         
@@ -183,8 +183,8 @@ class ZINQ:
         """
         return [
             i for i,chk in enumerate([
-                self._check_lib_confound(dname),
-                self._check_all_zero(dname),
+                self._check_lib_confound(dname), # not techincally implemented
+                self._check_all_zero(dname), 
                 self._check_limited_non_zero(dname),
                 self._check_perfect_separation(dname)
             ]) if chk]
@@ -245,7 +245,7 @@ class ZINQ:
         Returns True if the total sum of counts is less than `thresh`.
         """
         # Sum the values for the given name and compare with the threshold `thresh`
-        return self.Y[dname].sum() < thresh
+        return (self.Y[dname]!=0).sum() < thresh
     
 
     def _check_perfect_separation(self, dname) -> bool:
@@ -309,7 +309,7 @@ class ZINQ:
         """
         get the design matrix and covariates for a single data source
         """
-        y_column_vector = self.Y[dname][:, np.newaxis]
+        y_column_vector = self.Y[dname][:, np.newaxis] # should be C
 
         return np.hstack((self.Z, y_column_vector))
 
@@ -320,6 +320,7 @@ class ZINQ:
         """
         # betas, bse, fitll, stats, pvals 
         print(self._get_XZ(dname).shape)
+        # C should be Y
         return self._firth_regress(self.C, self._get_XZ(dname))
 
     
@@ -331,7 +332,9 @@ class ZINQ:
         yq = self.Y[dname][self.Y[dname] != 0]
         
         # calculate zero inflation rate
-        zero_rate = np.count_nonzero(self.Y[dname] == 0) / len(self.Y[dname])
+        zero_rate = (self.Y[dname] == 0).sum() / len(self.Y[dname])
+
+        self.zr = zero_rate
         
         if self.count_data: # dither discrete data
             yq = dither(yq, type="right", value=1)

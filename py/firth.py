@@ -119,5 +119,5 @@ def firth_logistic_regression(y : np.array,
             lr_pval = 1 if lr < 0 else chi2.sf(lr, 1)
             pvals.append(lr_pval)
 
-    return betas, bse, fitll, stats, pvals # uncomment for unit test
+    #return betas, bse, fitll, stats, pvals # uncomment for unit test
     return betas[-1], bse[-1], fitll, stats[-1], pvals[-1]
