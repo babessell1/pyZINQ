@@ -299,19 +299,21 @@ class ZINQ:
     
     
     @staticmethod
-    def _firth_regress(C : np.ndarray, x : np.ndarray) -> tuple[np.ndarray[float]]: # x 5 
+    def _firth_regress(Y : np.ndarray, x : np.ndarray) -> tuple[np.ndarray[float]]: # x 5 
         # betas, bse, fitll, stats, pvals 
-        
-        return firth_logistic_regression(C, x)
+        # change C to Y
+        return firth_logistic_regression(Y, x)
     
 
     def _get_XZ(self, dname) -> np.ndarray:
         """
         get the design matrix and covariates for a single data source
         """
-        y_column_vector = self.Y[dname][:, np.newaxis] # should be C
+        # y_column_vector = self.Y[dname][:, np.newaxis] # should be C
+        c_column_vector = self.C.reshape(-1, 1)
 
-        return np.hstack((self.Z, y_column_vector))
+        #return np.hstack((self.Z, y_column_vector))
+        return np.hstack((self.Z, c_column_vector))
 
     
     def run_firth_regression(self, dname):
@@ -321,7 +323,11 @@ class ZINQ:
         # betas, bse, fitll, stats, pvals 
         print(self._get_XZ(dname).shape)
         # C should be Y
-        return self._firth_regress(self.C, self._get_XZ(dname))
+        
+        # the dependent variable should be whether or not y is 0, not the actual y values. code aded below to change that. 
+        y_column_vector = np.multiply(1,self.Y[dname][:, np.newaxis]!=0).ravel()
+
+        return self._firth_regress(y_column_vector, self._get_XZ(dname))
 
     
     def _get_quantile(self, dname) -> np.ndarray:
