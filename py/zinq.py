@@ -299,19 +299,21 @@ class ZINQ:
     
     
     @staticmethod
-    def _firth_regress(C : np.ndarray, x : np.ndarray) -> tuple[np.ndarray[float]]: # x 5 
+    def _firth_regress(Y : np.ndarray, x : np.ndarray) -> tuple[np.ndarray[float]]: # x 5 
         # betas, bse, fitll, stats, pvals 
-        
-        return firth_logistic_regression(C, x)
+        # change C to Y
+        return firth_logistic_regression(Y, x)
     
 
     def _get_XZ(self, dname) -> np.ndarray:
         """
         get the design matrix and covariates for a single data source
         """
-        y_column_vector = self.Y[dname][:, np.newaxis] # should be C
+        # y_column_vector = self.Y[dname][:, np.newaxis] # should be C
+        c_column_vector = self.C.reshape(-1, 1)
 
-        return np.hstack((self.Z, y_column_vector))
+        #return np.hstack((self.Z, y_column_vector))
+        return np.hstack((self.Z, c_column_vector))
 
     
     def run_firth_regression(self, dname):
@@ -321,7 +323,11 @@ class ZINQ:
         # betas, bse, fitll, stats, pvals 
         print(self._get_XZ(dname).shape)
         # C should be Y
-        return self._firth_regress(self.C, self._get_XZ(dname))
+        
+        # the dependent variable should be whether or not y is 0, not the actual y values. code aded below to change that. 
+        y_column_vector = np.multiply(1,self.Y[dname][:, np.newaxis]!=0).ravel()
+
+        return self._firth_regress(y_column_vector, self._get_XZ(dname))
 
     
     def _get_quantile(self, dname) -> np.ndarray:
@@ -343,13 +349,18 @@ class ZINQ:
         
        
     @staticmethod
-    def _rank_score_test(c_star, betas, quantiles, m, width):
+    def _rank_score_test(c_star,y, betas, quantiles, m, width):
         """
         Rank score test for quantile regression.
+        betas are actually predictions from the null model.
+        corrections are added for rs calculation
         """
         quantiles = np.array(quantiles)
+        y = np.array(y)
         # this is ripped straight from the R code
-        rs = [np.sum((tau - betas[k]) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
+        #rs = [np.sum((tau - betas[k]) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
+        rs = [np.sum((tau - (y < betas[k])) * c_star) / np.sqrt(m) for k, tau in enumerate(quantiles)]
+        
         if width == 1:
             cov_rs = quantiles * (1 - quantiles)
         else:
@@ -392,14 +403,24 @@ class ZINQ:
         C_star = C_nonzero - Z_nonzero @ np.linalg.pinv(Z_nonzero.T @ Z_nonzero) @ Z_nonzero.T @ C_nonzero
 
         # Prepare DataFrame for quantile regression
-        data_nonzero = pd.DataFrame({'C': C_nonzero, 'y': yq})
+        #data_nonzero = pd.DataFrame({'C': C_nonzero, 'y': yq})
+        data_nonzero = pd.DataFrame(data=Z_nonzero)
+        data_nonzero.columns = self.covars
+        data_nonzero['y']=yq
 
         # Perform quantile regression for each quantile
-        model = smf.quantreg('y ~ C', data_nonzero)
+        #model = smf.quantreg('y ~ C', data_nonzero)
+        #qpred0 = [self._fit_quant_model(model, tau) for tau in self.quantiles]
+        #m = len(yq) 
+        #width = len(self.quantiles)
+        #pvals = self._rank_score_test(C_star, qpred0, self.quantiles, m, width)
+        quantile_null_formula = "y ~ " + "+".join(self.covars)
+        model = smf.quantreg(quantile_null_formula, data_nonzero)
         qpred0 = [self._fit_quant_model(model, tau) for tau in self.quantiles]
         m = len(yq) 
         width = len(self.quantiles)
-        pvals = self._rank_score_test(C_star, qpred0, self.quantiles, m, width)
+        #pvals = self._rank_score_test(C_star, qpred0, self.quantiles, m, width)
+        pvals = self._rank_score_test(C_star, yq, qpred0, self.quantiles, m, width)
 
         return pvals
 
