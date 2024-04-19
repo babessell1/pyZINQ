@@ -893,7 +893,7 @@
   \else
         \def\@oddfoot{{%
             \hbox to \textwidth{\parbox{\textwidth}{\hspace*{1pt}\vspace*{-0pt}\newline\rule{\textwidth}{.5pt}\vspace*{2pt}\newline%
-            \fontsize{6.5}{8}\fontshape{n}\selectfont\raggedright \copyright\space The Author \@copyrightyear. Published by Oxford University Press. All rights reserved. For permissions, please e-mail: journals.permissions@oup.com%
+            \fontsize{6.5}{8}\fontshape{n}\selectfont\raggedright %
               \hfill\vspace*{1pt}\newline\hspace*{1pt}\hfill\color{jnlclr}\textbf{\thepage}}}%
             }}%
       \def\@evenfoot{{%
