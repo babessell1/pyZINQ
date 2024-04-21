@@ -42,6 +42,7 @@
 
 \graphicspath{{Fig/}}
 
+
 % line numbers
 %\usepackage[mathlines, switch]{lineno}
 %\usepackage[right]{lineno}
@@ -108,7 +109,7 @@ as plain as possible.}
 
 \section{Introduction}
 
-Short tandem repeats (STRs) are repeated nucleotide motifs 2-9 base pairs long and make up
+Short tandem repeats (STRs) are repeated 2-9 bp nucleotide motifs, that make up at least
  ~3-5\% of the human genome\cite{gymrek_genomic_2017}. STRs can contract and expand through
 several mechanisms, most commonly slipped-strand mispairing. As a result of their inherent
 instability, their size and sometimes motif composition differ not only between individuals, 
@@ -367,7 +368,6 @@ Write('Pascal keywords.');
 \end{minipage}
 
 
-
 \section{Cross referencing}\label{sec8}
 
 Environments such as figure, table, equation, and align can have a label
@@ -379,6 +379,7 @@ the label declared for Figure \ref{fig1} which is
 \verb+\label{fig1}+. To cross-reference it, use the command
 \verb+ Figure \ref{fig1}+, for which it comes up as
 ``Figure~\ref{fig1}".
+
 
 \subsection{Details on reference citations}\label{subsec3}
 
@@ -521,5 +522,9 @@ Some Conclusions here.
 
 
 \bibliographystyle{plain}
-\bibliography{reference.bib}
+
+
+\addbibresource{references.bib}
+
+
 \end{document}
